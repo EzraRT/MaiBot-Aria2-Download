@@ -22,6 +22,12 @@
 
 配置示例见 [`config.example.toml`](config.example.toml)。该示例不是运行时配置，真实密钥应写入被 Git 忽略的 `config.toml`。
 
+下载设置统一位于 `[general]` 节，与 WebUI 的“磁链下载”分组对应。例如地址完整路径为 `general.aria2_url`；下表除版本字段外均省略 `general.` 前缀。
+
+旧版顶层配置仍可读取，保存时会规范化为 `[general]`，保留地址、密钥和权限等已有值。同一字段同时存在于顶层和 `[general]` 时，以 `[general]` 中的值为准。
+
+`on_config_update` 仅处理 `self` 范围的通知，通过 `set_plugin_config(config_data)` 校验并应用最新配置，下一条下载命令立即使用新值；已经开始的命令继续使用自己的配置快照。配置文件的保存由 Host/Runner 负责。
+
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `aria2_url` | `http://127.0.0.1:6800/jsonrpc` | 从 MaiBot Runner 所在环境访问 aria2 的地址 |
@@ -84,6 +90,7 @@ uv run ruff format --check .
 - [MaiBot 插件开发指南](https://docs.mai-mai.org/plugin/)
 - [MaiBot Command](https://docs.mai-mai.org/plugin/commands)
 - [MaiBot 配置管理](https://docs.mai-mai.org/plugin/config)
+- [MaiBot 生命周期](https://docs.mai-mai.org/plugin/lifecycle)
 - [MaiBot Plugin SDK](https://github.com/Mai-with-u/maibot-plugin-sdk)
 - [aria2 JSON-RPC](https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface)
 

@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase
+from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Command, Field, MaiBotPlugin, PluginConfigBase
 from pydantic import field_validator
 
 from .aria2_rpc import submit_magnets
@@ -25,10 +26,9 @@ class PluginMetadata(PluginConfigBase):
     config_version: str = Field(default="1.0.0", description="插件配置版本，请勿修改")
 
 
-class DownloadConfig(PluginConfigBase):
+class DownloadSettings(PluginConfigBase):
     __ui_label__ = "磁链下载"
 
-    plugin: PluginMetadata = Field(default_factory=PluginMetadata)
     enabled: bool = Field(default=True, description="启用磁链下载")
     aria2_url: str = Field(default="http://127.0.0.1:6800/jsonrpc", description="aria2 JSON-RPC 地址")
     aria2_token: str = Field(default="", description="aria2 RPC 密钥；未启用认证时留空", repr=False)
@@ -58,6 +58,11 @@ class DownloadConfig(PluginConfigBase):
         return value.strip().rstrip(".")
 
 
+class DownloadConfig(PluginConfigBase):
+    plugin: PluginMetadata = Field(default_factory=PluginMetadata)
+    general: DownloadSettings = Field(default_factory=DownloadSettings)
+
+
 class MagnetDownloadsPlugin(MaiBotPlugin):
     config_model = DownloadConfig
 
@@ -66,6 +71,20 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         self._inflight: set[tuple[str, str]] = set()
         self._handled: OrderedDict[tuple[str, str], float] = OrderedDict()
 
+    def normalize_plugin_config(self, config_data: Mapping[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        """Migrate flat 1.0.0 settings to the same section that WebUI reads and saves."""
+        raw = dict(config_data or {})
+        legacy = {name: raw.pop(name) for name in DownloadSettings.model_fields if name in raw}
+        if legacy:
+            general = raw.get("general", {})
+            if isinstance(general, Mapping):
+                # Explicit WebUI edits take priority over values left at the old root paths.
+                raw["general"] = {**legacy, **general}
+        # Keep config_version at 1.0.0: Runner rebuilds newer-version configs before this
+        # migration hook, which would otherwise discard the old root-level settings.
+        normalized, changed = super().normalize_plugin_config(raw)
+        return normalized, changed or normalized != dict(config_data or {})
+
     async def on_load(self) -> None:
         self.ctx.logger.info("磁链下载插件已加载：引用消息并发送“给我下”")
 
@@ -73,10 +92,13 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         self._handled.clear()
         self.ctx.logger.info("磁链下载插件已卸载")
 
-    async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
-        if scope == "self":
-            # Each invocation snapshots the SDK's updated config; no shared client to replace.
-            self.ctx.logger.info("磁链下载配置已更新")
+    async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
+        """Apply this plugin's latest settings; Host/Runner owns persistence to config.toml."""
+        if scope != CONFIG_RELOAD_SCOPE_SELF:
+            return
+        # Idempotent when Runner has already injected the new configuration.
+        self.set_plugin_config(config_data)
+        self.ctx.logger.info("磁链下载配置已更新: version=%s", version)
 
     async def _reply(self, text: str, stream_id: str, success: bool = False) -> tuple[bool, str, int]:
         if not await self.ctx.send.text(text, stream_id):
@@ -96,7 +118,7 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         stream_id = str(kwargs.get("stream_id") or message.get("session_id") or "")
         if not stream_id:
             return False, "命令缺少聊天流 ID", 2
-        config = cast(DownloadConfig, self.config).model_copy(deep=True)
+        config = cast(DownloadConfig, self.config).general.model_copy(deep=True)
         if not config.enabled:
             return False, "磁链下载已禁用", 0
         info = message.get("message_info") or {}
