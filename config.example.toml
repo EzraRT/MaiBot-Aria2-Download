@@ -1,0 +1,13 @@
+# 运行时 config.toml 由 MaiBot 自动生成；本文件仅供配置参考。
+enabled = true
+aria2_url = "http://127.0.0.1:6800/jsonrpc"
+aria2_token = ""
+download_dir = ""
+rpc_timeout = 15.0
+max_links = 50
+allowed_user_ids = []
+allowed_group_ids = []
+adapter_api_prefix = "maibot-team.snowluma-adapter.adapter.napcat.message"
+
+[plugin]
+config_version = "1.0.0"

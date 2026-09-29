@@ -1,0 +1,19 @@
+{
+  "manifest_version": 2,
+  "id": "ezrart.magnet-downloads",
+  "version": "1.0.0",
+  "name": "Aria2 磁链下载",
+  "description": "引用聊天消息并发送“给我下”，批量提取普通消息及合并转发中的磁链交给 aria2。",
+  "author": { "name": "EzraRT", "url": "https://ezrart.com" },
+  "license": "MIT",
+  "urls": { "repository": "https://github.com/EzraRT/MaiBot-Aria2-Download" },
+  "host_application": { "min_version": "1.2.0", "max_version": "1.3.99" },
+  "sdk": { "min_version": "2.8.2", "max_version": "2.99.99" },
+  "plugin_type": "tool",
+  "display": { "icon": { "type": "lucide", "value": "download" } },
+  "dependencies": [
+    { "type": "python_package", "name": "httpx", "version_spec": ">=0.28,<1" }
+  ],
+  "capabilities": ["send.text", "message.get_by_id", "api.call"],
+  "i18n": { "default_locale": "zh-CN", "supported_locales": ["zh-CN"] }
+}
