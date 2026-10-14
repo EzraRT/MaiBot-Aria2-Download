@@ -1,6 +1,8 @@
-# MaiBot Aria2 Download
+# MaiBot 磁链下载（aria2 / qBittorrent）
 
-从 `koishi-plugin-magnet-downloads` 迁移的 MaiBot 插件。**引用一条消息，发送“给我下”**，插件提取其中的磁力链接并添加到 aria2 下载队列。
+从 `koishi-plugin-magnet-downloads` 迁移的 MaiBot 插件。**引用一条消息，发送“给我下”**，插件提取其中的磁力链接并提交给配置的 aria2 或 qBittorrent 下载器。
+
+当前版本：**1.1.0**。本版新增 qBittorrent 支持和下载器选择，详见 [变更记录](CHANGELOG.md)。
 
 插件入口、清单和项目配置均位于仓库根目录，无需进入额外的项目子目录。
 
@@ -8,17 +10,25 @@
 
 - MaiBot 新版 Host/Runner 插件系统，清单声明 Host `1.2.0–1.3.99`。
 - `maibot-plugin-sdk >=2.8.2,<3`，Python 3.11 及以上。
-- 已开启 HTTP/HTTPS JSON-RPC 的 aria2。
+- 下载器二选一：已开启 HTTP/HTTPS JSON-RPC 的 aria2，或已开启 WebUI、提供 Web API v2 的 qBittorrent。
 - QQ 转发详情查询默认使用 SnowLuma 适配器（也支持其 NapCat 客户端模式）的公开 API。
 
-本插件使用当前官方 SDK，不兼容旧版 `src.plugin_system` / `BasePlugin` 插件接口。开发验证使用 SDK 2.8.2；真实 MaiBot、QQ 和 aria2 的联调需在安装后进行。
+本插件使用当前官方 SDK，不兼容旧版 `src.plugin_system` / `BasePlugin` 插件接口。开发验证使用 SDK 2.8.2；真实 MaiBot、QQ 和下载器的联调需在安装后进行。
+
+## 从 1.0.0 升级
+
+1. 更新插件目录中的源码、清单和项目文件，保留现有 `config.toml`，不要用示例配置覆盖它。
+2. 重新加载插件或重启 MaiBot，使新代码和配置界面生效。新增字段会补充默认值，`downloader` 默认为 `aria2`，沿用已有地址、密钥、下载目录和权限设置。
+3. 如需使用 qBittorrent，在 WebUI 中选择 `qbittorrent` 并填写 WebUI 地址、用户名和密码。保存后，下一条命令使用新配置；已开始的命令继续使用原配置。
+
+插件版本已更新为 `1.1.0`，配置结构版本 `plugin.config_version` 保持 `1.0.0`。本次新增的配置字段均有默认值，无需手动修改配置版本。旧版顶层字段仍会迁移到 `[general]`，以保留原有配置。
 
 ## 安装与配置
 
 1. 将本仓库放入 **实际运行的新版 MaiBot** 的 `plugins/MaiBot-Aria2-Download/`，保持 `plugin.py` 和 `_manifest.json` 在该插件目录的第一层。也可以将当前项目目录链接到该位置。
 2. 启动或重新加载 MaiBot 插件。Host 根据清单安装 `httpx` 依赖，SDK 由 MaiBot 运行环境提供。
-3. 在 MaiBot WebUI 的插件配置中填写 `aria2_url` 和 `aria2_token`；也可修改安装目录中自动生成的 `config.toml`。配置变更由框架热更新。
-4. 引用一条含有磁链的消息，发送 `给我下`。收到“已添加 N 个下载任务到 aria2”表示 aria2 已返回任务 ID，**不代表文件已下载完成**。
+3. 在 MaiBot WebUI 的“磁链下载”配置分组中选择 `downloader`，并填写对应下载器的连接信息；也可修改安装目录中自动生成的 `config.toml`。默认使用 aria2，已有配置无需切换。配置变更由框架热更新。
+4. 引用一条含有磁链的消息，发送 `给我下`。aria2 返回任务 ID 后回复“已添加”；qBittorrent 确认接收请求后回复“已提交”。两者均**不代表文件已下载完成**，qBittorrent 是否新增任务需查看下载列表。
 
 配置示例见 [`config.example.toml`](config.example.toml)。该示例不是运行时配置，真实密钥应写入被 Git 忽略的 `config.toml`。
 
@@ -30,22 +40,42 @@
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
+| `downloader` | `aria2` | 选择 `aria2` 或 `qbittorrent`，每条命令仅使用所选下载器 |
 | `aria2_url` | `http://127.0.0.1:6800/jsonrpc` | 从 MaiBot Runner 所在环境访问 aria2 的地址 |
 | `aria2_token` | 空 | 对应 aria2 的 `rpc-secret`；不需要加 `token:` 前缀 |
-| `download_dir` | 空 | aria2 服务器上的下载目录，留空沿用 aria2 配置 |
-| `rpc_timeout` | `15` | 整个批量提交请求的超时秒数，范围 1–30 |
+| `qbittorrent_url` | `http://127.0.0.1:8080` | qBittorrent WebUI 根地址，可含反向代理路径，不要附加 `/api/v2` |
+| `qbittorrent_username` | 空 | qBittorrent WebUI 用户名 |
+| `qbittorrent_password` | 空 | qBittorrent WebUI 密码；与用户名同时填写 |
+| `qbittorrent_category` | 空 | qBittorrent 任务分类，留空不指定 |
+| `qbittorrent_tags` | `[]` | qBittorrent 任务标签，如 `["chat", "linux"]`；单个标签不能含逗号或换行 |
+| `download_dir` | 空 | 所选下载器服务器上的下载目录，留空沿用下载器配置 |
+| `rpc_timeout` | `15` | 批量提交超时秒数，范围 1–30；qBittorrent 包含登录与提交，退出会话最多额外等待 2 秒 |
 | `max_links` | `50` | 去重后每次最多提交的磁链数，超限时整批不提交 |
 | `allowed_user_ids` | `[]` | 允许使用的用户 ID 字符串列表，空列表表示不限 |
 | `allowed_group_ids` | `[]` | 允许使用的群 ID 字符串列表，非空时禁止私聊 |
 | `enabled` | `true` | 是否处理下载命令 |
 | `adapter_api_prefix` | `maibot-team.snowluma-adapter.adapter.napcat.message` | QQ 消息查询 API 前缀，留空则不调用适配器 |
-| `plugin.config_version` | `1.0.0` | SDK 必需的配置版本字段，位于 `[plugin]` 节 |
+| `plugin.config_version` | `1.0.0` | 配置结构版本，独立于插件版本，位于 `[plugin]` 节，请勿手动修改 |
 
 允许列表同时填写时，用户和群必须同时匹配。默认沿用原插件的使用范围，不额外限制用户或群。若 MaiBot 已配置命令权限，还需通过宿主对 `magnet_download` 命令的权限检查。
 
 原 Koishi 配置迁移：`aria2Url` 对应 `aria2_url`，`aria2Token` 对应 `aria2_token`。不沿用源码中写死的示例密钥 `12345678`，请填写实际的 RPC 密钥。
 
-MaiBot 与 aria2 分别运行在容器或不同机器时，`127.0.0.1` 指向 Runner 自己所在的网络环境，需要改为能访问 aria2 的地址。文件始终由 aria2 下载到其服务器，而非下载到聊天客户端。
+例如，在现有 `config.toml` 的 `[general]` 节内修改以下字段即可切换到 qBittorrent（不要重复创建 `[general]` 节）：
+
+```toml
+downloader = "qbittorrent"
+qbittorrent_url = "http://192.168.1.10:8080"
+qbittorrent_username = "admin"
+qbittorrent_password = "填写实际 WebUI 密码"
+qbittorrent_category = ""
+qbittorrent_tags = ["chat"]
+download_dir = ""
+```
+
+qBittorrent 用户名和密码同时留空时，插件跳过登录，仅适用于下载器已经配置的免认证访问；否则会提示未授权。密码与 aria2 密钥在 WebUI 中使用密码输入框。设置 `download_dir` 时，qBittorrent 请求会关闭该批任务的自动种子管理（`autoTMM=false`），以使用指定目录；留空则不覆盖下载器的目录和自动管理设置。
+
+MaiBot 与下载器分别运行在容器或不同机器时，`127.0.0.1` 指向 Runner 自己所在的网络环境，需要改为能访问下载器的地址。文件始终由所选下载器下载到其服务器，而非下载到聊天客户端。
 
 ## 使用行为
 
@@ -54,8 +84,9 @@ MaiBot 与 aria2 分别运行在容器或不同机器时，`127.0.0.1` 指向 Ru
 - 支持普通文本、混合消息和嵌套合并转发；读取转发中的所有文本段，不限于第一个消息段。
 - 支持 40 位十六进制及 32 位 Base32 的 BTIH 磁链，保留名称 `dn`、Tracker `tr` 等参数。仅支持 `btmh` 的 v2 磁链、裸哈希、种子附件和图片中的磁链不在处理范围内。
 - 单条命令内按信息哈希去重，十六进制和 Base32 表达也会合并。同一命令消息重复投递时，运行中的请求及最近 10 分钟内最多 512 条已处理消息会被忽略。此缓存不跨插件重启，不对用户新发送的命令做全局去重。
-- 多条磁链使用 aria2 JSON-RPC batch，各自调用一次 `aria2.addUri`，逐项核对返回 ID，反馈成功、失败和未确认数量。
-- 超时或响应不完整时不自动重试，以免已被 aria2 接收的任务重复添加；请先检查下载列表，再决定是否发送新的命令。
+- aria2：多条磁链使用 JSON-RPC batch，各自调用一次 `aria2.addUri`，逐项核对返回 ID，反馈成功、失败和未确认数量。
+- qBittorrent：通过 WebUI 用户名和密码登录，携带会话 Cookie 向 `/api/v2/torrents/add` 一次提交多条磁链，随后退出本次会话。接口仅确认整批请求已接收，不返回逐项任务 ID，因此回复“已提交”，任务是否新增及实际状态以下载列表为准。
+- 超时或响应不完整时不自动重试，也不切换到另一下载器，以免已被接收的任务重复添加；请先检查下载列表，再决定是否发送新的命令。
 
 ## 引用与转发的读取方式
 
@@ -79,9 +110,9 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-测试按照 MaiBot PluginLoader 的包加载方式导入插件，使用真实 SDK 验证组件注册、默认配置、WebUI Schema 和能力代理；使用模拟 Host 与 HTTP 传输验证消息解析、aria2 请求协议和错误反馈。测试不会向实际 aria2 创建下载任务，也不会向聊天平台发送消息。
+本地验证使用 MaiBot PluginLoader 的包加载方式和真实 SDK，覆盖组件注册、默认配置、WebUI Schema、配置热更新与下载器切换；使用模拟 Host 与 HTTP 传输验证消息解析、aria2 批量提交、qBittorrent 登录和会话、分类与标签、中文目录、超时和错误反馈。验证不会向实际下载器创建任务，也不会向聊天平台发送消息。测试用例仅在本地保留，不随提交发布。
 
-源码分工：`plugin.py` 管理命令与配置，`messages.py` 读取消息，`magnets.py` 提取和去重，`aria2_rpc.py` 提交下载。
+源码分工：`plugin.py` 管理命令与配置，`messages.py` 读取消息，`magnets.py` 提取和去重，`aria2_rpc.py` 与 `qbittorrent_api.py` 分别适配两种下载器，`submission.py` 定义提交结果。
 
 清单中的仓库链接按当前项目名称填写为 `https://github.com/EzraRT/MaiBot-Aria2-Download`；此迁移未创建或发布远程仓库。发布前请将它核对为实际仓库地址。
 
@@ -93,5 +124,6 @@ uv run ruff format --check .
 - [MaiBot 生命周期](https://docs.mai-mai.org/plugin/lifecycle)
 - [MaiBot Plugin SDK](https://github.com/Mai-with-u/maibot-plugin-sdk)
 - [aria2 JSON-RPC](https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface)
+- [qBittorrent Web API v2](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29)
 
 许可证：MIT，沿用原插件许可。

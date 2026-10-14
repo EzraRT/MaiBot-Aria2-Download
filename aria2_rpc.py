@@ -4,20 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass
+from typing import Literal
 from uuid import uuid4
 
 import httpx
 
 from .magnets import Magnet
-
-
-@dataclass(frozen=True)
-class Submission:
-    magnet: Magnet
-    status: str  # added, rejected, unknown
-    gid: str = ""
-    error: str = ""
+from .submission import Submission
 
 
 async def submit_magnets(
@@ -40,7 +33,7 @@ async def submit_magnets(
             params.append({"dir": download_dir})
         requests.append({"jsonrpc": "2.0", "id": uuid4().hex, "method": "aria2.addUri", "params": params})
 
-    def all_results(status: str, error: str) -> list[Submission]:
+    def all_results(status: Literal["rejected", "unknown"], error: str) -> list[Submission]:
         return [Submission(magnet, status, error=error) for magnet in magnets]
 
     try:

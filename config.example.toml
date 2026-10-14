@@ -1,11 +1,24 @@
 # 运行时 config.toml 由 MaiBot 自动生成；本文件仅供配置参考。
 [plugin]
+# 配置结构版本独立于插件版本；插件 1.1.0 仍使用 1.0.0，兼容已有配置。
 config_version = "1.0.0"
 
 [general]
 enabled = true
+downloader = "aria2" # 可选：aria2 / qbittorrent
+
+# aria2
 aria2_url = "http://127.0.0.1:6800/jsonrpc"
 aria2_token = ""
+
+# qBittorrent；地址填写 WebUI 根地址，不要添加 /api/v2。
+qbittorrent_url = "http://127.0.0.1:8080"
+qbittorrent_username = ""
+qbittorrent_password = ""
+qbittorrent_category = ""
+qbittorrent_tags = []
+
+# 两种下载器共用；路径属于所选下载器所在的机器。
 download_dir = ""
 rpc_timeout = 15.0
 max_links = 50

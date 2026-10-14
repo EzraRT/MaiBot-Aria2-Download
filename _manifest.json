@@ -1,9 +1,9 @@
 {
   "manifest_version": 2,
   "id": "ezrart.magnet-downloads",
-  "version": "1.0.0",
-  "name": "Aria2 磁链下载",
-  "description": "引用聊天消息并发送“给我下”，批量提取普通消息及合并转发中的磁链交给 aria2。",
+  "version": "1.1.0",
+  "name": "Aria2 / qBittorrent 磁链下载",
+  "description": "引用聊天消息并发送“给我下”，批量提取普通消息及合并转发中的磁链交给 aria2 或 qBittorrent。",
   "author": { "name": "EzraRT", "url": "https://ezrart.com" },
   "license": "MIT",
   "urls": { "repository": "https://github.com/EzraRT/MaiBot-Aria2-Download" },
