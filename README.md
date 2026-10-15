@@ -2,7 +2,7 @@
 
 从 `koishi-plugin-magnet-downloads` 迁移的 MaiBot 插件。**引用一条消息，发送“给我下”**，插件提取其中的磁力链接并提交给配置的 aria2 或 qBittorrent 下载器。
 
-当前版本：**1.1.0**。本版新增 qBittorrent 支持和下载器选择，详见 [变更记录](CHANGELOG.md)。
+当前版本：**2.0.0**。qBittorrent 改为 API Token 认证，并增加保存配置后的连接校验。此版本不再支持 qBittorrent 用户名、密码认证，升级步骤见下文，完整变更见 [变更记录](CHANGELOG.md)。
 
 插件入口、清单和项目配置均位于仓库根目录，无需进入额外的项目子目录。
 
@@ -10,18 +10,18 @@
 
 - MaiBot 新版 Host/Runner 插件系统，清单声明 Host `1.2.0–1.3.99`。
 - `maibot-plugin-sdk >=2.8.2,<3`，Python 3.11 及以上。
-- 下载器二选一：已开启 HTTP/HTTPS JSON-RPC 的 aria2，或已开启 WebUI、提供 Web API v2 的 qBittorrent。
+- 下载器二选一：已开启 HTTP/HTTPS JSON-RPC 的 aria2，或已开启 WebUI 的 **qBittorrent 5.2.0+（WebAPI 2.14.1+）**。qBittorrent API Token 从该版本开始支持。
 - QQ 转发详情查询默认使用 SnowLuma 适配器（也支持其 NapCat 客户端模式）的公开 API。
 
 本插件使用当前官方 SDK，不兼容旧版 `src.plugin_system` / `BasePlugin` 插件接口。开发验证使用 SDK 2.8.2；真实 MaiBot、QQ 和下载器的联调需在安装后进行。
 
-## 从 1.0.0 升级
+## 升级与认证迁移
 
 1. 更新插件目录中的源码、清单和项目文件，保留现有 `config.toml`，不要用示例配置覆盖它。
 2. 重新加载插件或重启 MaiBot，使新代码和配置界面生效。新增字段会补充默认值，`downloader` 默认为 `aria2`，沿用已有地址、密钥、下载目录和权限设置。
-3. 如需使用 qBittorrent，在 WebUI 中选择 `qbittorrent` 并填写 WebUI 地址、用户名和密码。保存后，下一条命令使用新配置；已开始的命令继续使用原配置。
+3. 如需使用 qBittorrent，在下载器的设置 → WebUI → API Key 中生成 Token，在插件配置中选择 `qbittorrent` 并填写 WebUI 地址和 `qbittorrent_token`。保存后的连接校验通过后，下一条命令使用新配置；已开始的命令继续使用原配置。
 
-插件版本已更新为 `1.1.0`，配置结构版本 `plugin.config_version` 保持 `1.0.0`。本次新增的配置字段均有默认值，无需手动修改配置版本。旧版顶层字段仍会迁移到 `[general]`，以保留原有配置。
+配置结构版本 `plugin.config_version` 保持 `1.0.0`，无需手动修改。旧版顶层字段仍会迁移到 `[general]`，以保留 aria2 等配置。此前使用 qBittorrent 用户名和密码的用户，需要升级下载器并手动生成 Token；`qbittorrent_username`、`qbittorrent_password` 已移除，旧密码不会自动转换为 Token，归一化配置时会移除这两个废弃字段。
 
 ## 安装与配置
 
@@ -36,7 +36,11 @@
 
 旧版顶层配置仍可读取，保存时会规范化为 `[general]`，保留地址、密钥和权限等已有值。同一字段同时存在于顶层和 `[general]` 时，以 `[general]` 中的值为准。
 
-`on_config_update` 仅处理 `self` 范围的通知，通过 `set_plugin_config(config_data)` 校验并应用最新配置，下一条下载命令立即使用新值；已经开始的命令继续使用自己的配置快照。配置文件的保存由 Host/Runner 负责。
+`on_config_update` 仅处理 `self` 范围的通知。插件先测试当前所选下载器的连接与认证，通过后应用配置，下一条下载命令使用新值；已经开始的命令继续使用自己的配置快照。
+
+保存后的校验只读取版本信息：qBittorrent 请求 `/api/v2/app/webapiVersion`，检查 Token 与 API 版本；aria2 请求 `aria2.getVersion`，检查地址与 RPC 密钥。校验最多等待 `min(rpc_timeout, 5)` 秒，不会创建下载任务。`enabled=false` 时跳过连接校验，允许在下载器不可用时停用插件。
+
+**保存与校验的边界：** MaiBot 会先写入 `config.toml` 并注入候选配置，再触发异步更新事件。因此连接失败不能阻止配置文件保存；插件会在日志中记录具体原因、上报回调失败，并让当前进程继续使用上一次已应用的配置。校验期间收到的命令也使用旧配置。请修正后重新保存，直至日志出现“下载器连接校验通过”；重启会重新读取磁盘配置，内存中的旧配置不会跨重启保留。仅打开配置页面不会测试连接。
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -44,12 +48,11 @@
 | `aria2_url` | `http://127.0.0.1:6800/jsonrpc` | 从 MaiBot Runner 所在环境访问 aria2 的地址 |
 | `aria2_token` | 空 | 对应 aria2 的 `rpc-secret`；不需要加 `token:` 前缀 |
 | `qbittorrent_url` | `http://127.0.0.1:8080` | qBittorrent WebUI 根地址，可含反向代理路径，不要附加 `/api/v2` |
-| `qbittorrent_username` | 空 | qBittorrent WebUI 用户名 |
-| `qbittorrent_password` | 空 | qBittorrent WebUI 密码；与用户名同时填写 |
+| `qbittorrent_token` | 空 | qBittorrent API Token；在 WebUI 的 API Key 设置中生成，仅填写 Token 本身，不加 `Bearer ` 前缀 |
 | `qbittorrent_category` | 空 | qBittorrent 任务分类，留空不指定 |
 | `qbittorrent_tags` | `[]` | qBittorrent 任务标签，如 `["chat", "linux"]`；单个标签不能含逗号或换行 |
 | `download_dir` | 空 | 所选下载器服务器上的下载目录，留空沿用下载器配置 |
-| `rpc_timeout` | `15` | 批量提交超时秒数，范围 1–30；qBittorrent 包含登录与提交，退出会话最多额外等待 2 秒 |
+| `rpc_timeout` | `15` | 批量提交超时秒数，范围 1–30；保存后的连接校验使用该值且最多等待 5 秒 |
 | `max_links` | `50` | 去重后每次最多提交的磁链数，超限时整批不提交 |
 | `allowed_user_ids` | `[]` | 允许使用的用户 ID 字符串列表，空列表表示不限 |
 | `allowed_group_ids` | `[]` | 允许使用的群 ID 字符串列表，非空时禁止私聊 |
@@ -66,14 +69,13 @@
 ```toml
 downloader = "qbittorrent"
 qbittorrent_url = "http://192.168.1.10:8080"
-qbittorrent_username = "admin"
-qbittorrent_password = "填写实际 WebUI 密码"
+qbittorrent_token = "填写实际生成的 API Token"
 qbittorrent_category = ""
 qbittorrent_tags = ["chat"]
 download_dir = ""
 ```
 
-qBittorrent 用户名和密码同时留空时，插件跳过登录，仅适用于下载器已经配置的免认证访问；否则会提示未授权。密码与 aria2 密钥在 WebUI 中使用密码输入框。设置 `download_dir` 时，qBittorrent 请求会关闭该批任务的自动种子管理（`autoTMM=false`），以使用指定目录；留空则不覆盖下载器的目录和自动管理设置。
+qBittorrent 每次请求都通过 `Authorization: Bearer <Token>` 认证，不再使用用户名、密码或会话 Cookie。Token 必须填写，使用密码输入框显示，错误反馈不会包含 Token。设置 `download_dir` 时，qBittorrent 请求会关闭该批任务的自动种子管理（`autoTMM=false`），以使用指定目录；留空则不覆盖下载器的目录和自动管理设置。
 
 MaiBot 与下载器分别运行在容器或不同机器时，`127.0.0.1` 指向 Runner 自己所在的网络环境，需要改为能访问下载器的地址。文件始终由所选下载器下载到其服务器，而非下载到聊天客户端。
 
@@ -85,7 +87,7 @@ MaiBot 与下载器分别运行在容器或不同机器时，`127.0.0.1` 指向 
 - 支持 40 位十六进制及 32 位 Base32 的 BTIH 磁链，保留名称 `dn`、Tracker `tr` 等参数。仅支持 `btmh` 的 v2 磁链、裸哈希、种子附件和图片中的磁链不在处理范围内。
 - 单条命令内按信息哈希去重，十六进制和 Base32 表达也会合并。同一命令消息重复投递时，运行中的请求及最近 10 分钟内最多 512 条已处理消息会被忽略。此缓存不跨插件重启，不对用户新发送的命令做全局去重。
 - aria2：多条磁链使用 JSON-RPC batch，各自调用一次 `aria2.addUri`，逐项核对返回 ID，反馈成功、失败和未确认数量。
-- qBittorrent：通过 WebUI 用户名和密码登录，携带会话 Cookie 向 `/api/v2/torrents/add` 一次提交多条磁链，随后退出本次会话。接口仅确认整批请求已接收，不返回逐项任务 ID，因此回复“已提交”，任务是否新增及实际状态以下载列表为准。
+- qBittorrent：携带 API Token 向 `/api/v2/torrents/add` 一次提交多条磁链，不调用登录或退出接口。接口仅确认整批请求已接收，不返回逐项任务 ID，因此回复“已提交”，任务是否新增及实际状态以下载列表为准。
 - 超时或响应不完整时不自动重试，也不切换到另一下载器，以免已被接收的任务重复添加；请先检查下载列表，再决定是否发送新的命令。
 
 ## 引用与转发的读取方式
@@ -110,7 +112,7 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-本地验证使用 MaiBot PluginLoader 的包加载方式和真实 SDK，覆盖组件注册、默认配置、WebUI Schema、配置热更新与下载器切换；使用模拟 Host 与 HTTP 传输验证消息解析、aria2 批量提交、qBittorrent 登录和会话、分类与标签、中文目录、超时和错误反馈。验证不会向实际下载器创建任务，也不会向聊天平台发送消息。测试用例仅在本地保留，不随提交发布。
+本地验证使用 MaiBot PluginLoader 的包加载方式和真实 SDK，覆盖组件注册、默认配置、WebUI Schema、配置热更新、校验失败后的配置恢复与下载器切换；使用模拟 Host 与 HTTP 传输验证消息解析、aria2 批量提交、qBittorrent Token 认证、只读连接校验、分类与标签、中文目录、超时和错误反馈。验证不会向实际下载器创建任务，也不会向聊天平台发送消息。测试用例仅在本地保留，不随提交发布。
 
 源码分工：`plugin.py` 管理命令与配置，`messages.py` 读取消息，`magnets.py` 提取和去重，`aria2_rpc.py` 与 `qbittorrent_api.py` 分别适配两种下载器，`submission.py` 定义提交结果。
 
@@ -125,5 +127,6 @@ uv run ruff format --check .
 - [MaiBot Plugin SDK](https://github.com/Mai-with-u/maibot-plugin-sdk)
 - [aria2 JSON-RPC](https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface)
 - [qBittorrent Web API v2](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29)
+- [qBittorrent API Key 认证（5.2.0+）](https://github.com/qbittorrent/wiki/blob/master/API-Key-Authentication-%28%E2%89%A5v5.2.0%29.md)
 
 许可证：MIT，沿用原插件许可。

@@ -11,11 +11,13 @@ from urllib.parse import urlsplit
 
 import httpx
 from maibot_sdk import CONFIG_RELOAD_SCOPE_SELF, Command, Field, MaiBotPlugin, PluginConfigBase
-from pydantic import field_validator
+from pydantic import ConfigDict, field_validator
 
+from .aria2_rpc import check_connection as check_aria2_connection
 from .aria2_rpc import submit_magnets as submit_to_aria2
 from .magnets import extract_magnets
 from .messages import MessageResolver, SourceError
+from .qbittorrent_api import check_connection as check_qbittorrent_connection
 from .qbittorrent_api import submit_magnets as submit_to_qbittorrent
 
 COMMAND_PATTERN = r"(?s)^.*给我下\s*$"
@@ -29,6 +31,7 @@ class PluginMetadata(PluginConfigBase):
 
 class DownloadSettings(PluginConfigBase):
     __ui_label__ = "磁链下载"
+    model_config = ConfigDict(hide_input_in_errors=True)
 
     enabled: bool = Field(default=True, description="启用磁链下载")
     downloader: Literal["aria2", "qbittorrent"] = Field(
@@ -44,17 +47,18 @@ class DownloadSettings(PluginConfigBase):
     qbittorrent_url: str = Field(
         default="http://127.0.0.1:8080", description="qBittorrent WebUI 根地址，可含反向代理路径"
     )
-    qbittorrent_username: str = Field(default="", description="qBittorrent WebUI 用户名；免认证时与密码同时留空")
-    qbittorrent_password: str = Field(
+    qbittorrent_token: str = Field(
         default="",
-        description="qBittorrent WebUI 密码",
+        description="qBittorrent API Token；在 5.2.0+ 的 WebUI 设置中生成，保存后测试连接",
         repr=False,
         json_schema_extra={"input_type": "password"},
     )
     qbittorrent_category: str = Field(default="", description="qBittorrent 任务分类；留空沿用下载器默认值")
     qbittorrent_tags: list[str] = Field(default_factory=list, description="qBittorrent 任务标签列表")
     download_dir: str = Field(default="", description="所选下载器服务器上的下载目录；留空使用下载器默认设置")
-    rpc_timeout: float = Field(default=15, ge=1, le=30, description="下载器请求超时（秒）；qBittorrent 包含登录与提交")
+    rpc_timeout: float = Field(
+        default=15, ge=1, le=30, description="下载器请求超时（秒）；保存后的连接校验最多等待 5 秒"
+    )
     max_links: int = Field(default=50, ge=1, le=500, description="单条命令最多添加的不同磁链数量")
     allowed_user_ids: list[str] = Field(default_factory=list, description="允许使用的用户 ID；留空不限")
     allowed_group_ids: list[str] = Field(default_factory=list, description="允许使用的群 ID；留空不限，填写后禁用私聊")
@@ -99,6 +103,11 @@ class DownloadSettings(PluginConfigBase):
             raise ValueError("qBittorrent 单个标签不能包含逗号或换行，请使用列表中的多个元素")
         return list(dict.fromkeys(value.strip() for value in values if value.strip()))
 
+    @field_validator("qbittorrent_token")
+    @classmethod
+    def normalize_qbittorrent_token(cls, value: str) -> str:
+        return value.strip()
+
     @field_validator("adapter_api_prefix")
     @classmethod
     def normalize_api_prefix(cls, value: str) -> str:
@@ -106,6 +115,8 @@ class DownloadSettings(PluginConfigBase):
 
 
 class DownloadConfig(PluginConfigBase):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     plugin: PluginMetadata = Field(default_factory=PluginMetadata)
     general: DownloadSettings = Field(default_factory=DownloadSettings)
 
@@ -117,6 +128,8 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         super().__init__()
         self._inflight: set[tuple[str, str]] = set()
         self._handled: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._active_config: DownloadConfig | None = None
+        self._config_update_lock = asyncio.Lock()
 
     def normalize_plugin_config(self, config_data: Mapping[str, Any] | None) -> tuple[dict[str, Any], bool]:
         """Migrate flat 1.0.0 settings to the same section that WebUI reads and saves."""
@@ -133,6 +146,7 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         return normalized, changed or normalized != dict(config_data or {})
 
     async def on_load(self) -> None:
+        self._active_config = cast(DownloadConfig, self.config).model_copy(deep=True)
         self.ctx.logger.info("磁链下载插件已加载：引用消息并发送“给我下”")
 
     async def on_unload(self) -> None:
@@ -140,12 +154,45 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         self.ctx.logger.info("磁链下载插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
-        """Apply this plugin's latest settings; Host/Runner owns persistence to config.toml."""
+        """Check saved settings before using them; Host has already written config.toml."""
         if scope != CONFIG_RELOAD_SCOPE_SELF:
             return
-        # Idempotent when Runner has already injected the new configuration.
-        self.set_plugin_config(config_data)
-        self.ctx.logger.info("磁链下载配置已更新: version=%s", version)
+        async with self._config_update_lock:
+            previous = self._active_config or cast(DownloadConfig, self.config).model_copy(deep=True)
+            # Runner injects the candidate before this callback. Commands keep using the
+            # previous snapshot while the new endpoint is being checked.
+            self._active_config = previous
+            try:
+                normalized, _ = self.normalize_plugin_config(config_data)
+                candidate = DownloadConfig.model_validate(normalized)
+                settings = candidate.general
+                if settings.enabled:
+                    async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+                        timeout = min(settings.rpc_timeout, 5)
+                        if settings.downloader == "qbittorrent":
+                            api_version = await check_qbittorrent_connection(
+                                client,
+                                url=settings.qbittorrent_url,
+                                token=settings.qbittorrent_token,
+                                rpc_timeout=timeout,
+                            )
+                        else:
+                            api_version = await check_aria2_connection(
+                                client, url=settings.aria2_url, token=settings.aria2_token, rpc_timeout=timeout
+                            )
+                    self.ctx.logger.info("下载器连接校验通过：%s version=%s", settings.downloader, api_version)
+                self.set_plugin_config(normalized)
+                self._active_config = candidate.model_copy(deep=True)
+            except (ValueError, asyncio.CancelledError) as exc:
+                # Restore runtime state only. Rewriting the Host's file here would race
+                # later saves and re-trigger its configuration watcher.
+                self.set_plugin_config(previous.model_dump(mode="python"))
+                self.ctx.logger.error(
+                    "下载配置校验未通过：%s；继续使用上一次已应用的配置，请修正后重新保存。",
+                    str(exc) or "校验已取消",
+                )
+                raise
+            self.ctx.logger.info("磁链下载配置已更新: version=%s", version)
 
     async def _reply(self, text: str, stream_id: str, success: bool = False) -> tuple[bool, str, int]:
         if not await self.ctx.send.text(text, stream_id):
@@ -165,7 +212,8 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         stream_id = str(kwargs.get("stream_id") or message.get("session_id") or "")
         if not stream_id:
             return False, "命令缺少聊天流 ID", 2
-        config = cast(DownloadConfig, self.config).general.model_copy(deep=True)
+        active_config = self._active_config or cast(DownloadConfig, self.config)
+        config = active_config.general.model_copy(deep=True)
         if not config.enabled:
             return False, "磁链下载已禁用", 0
         info = message.get("message_info") or {}
@@ -215,8 +263,7 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
                         client,
                         magnets,
                         url=config.qbittorrent_url,
-                        username=config.qbittorrent_username,
-                        password=config.qbittorrent_password,
+                        token=config.qbittorrent_token,
                         category=config.qbittorrent_category,
                         tags=config.qbittorrent_tags,
                         rpc_timeout=config.rpc_timeout,
