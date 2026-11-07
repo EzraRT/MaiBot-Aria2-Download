@@ -19,6 +19,7 @@ from .magnets import extract_magnets
 from .messages import MessageResolver, SourceError
 from .qbittorrent_api import check_connection as check_qbittorrent_connection
 from .qbittorrent_api import submit_magnets as submit_to_qbittorrent
+from .submission import SubmissionSummary
 
 COMMAND_PATTERN = r"(?s)^.*给我下\s*$"
 
@@ -157,14 +158,17 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
         """Check saved settings before using them; Host has already written config.toml."""
         if scope != CONFIG_RELOAD_SCOPE_SELF:
             return
+        normalized, _ = self.normalize_plugin_config(config_data)
+        candidate = DownloadConfig.model_validate(normalized)
+        if self._active_config is None:
+            self._active_config = cast(DownloadConfig, self.config).model_copy(deep=True)
+        # The SDK config represents the latest saved settings, including an unverified
+        # token. Keep it separate from the snapshot used by download commands.
+        # Publish before waiting for the lock so an older check cannot overwrite a
+        # newer save when it completes, fails or gets cancelled.
+        self.set_plugin_config(normalized)
         async with self._config_update_lock:
-            previous = self._active_config or cast(DownloadConfig, self.config).model_copy(deep=True)
-            # Runner injects the candidate before this callback. Commands keep using the
-            # previous snapshot while the new endpoint is being checked.
-            self._active_config = previous
             try:
-                normalized, _ = self.normalize_plugin_config(config_data)
-                candidate = DownloadConfig.model_validate(normalized)
                 settings = candidate.general
                 if settings.enabled:
                     async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
@@ -181,14 +185,12 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
                                 client, url=settings.aria2_url, token=settings.aria2_token, rpc_timeout=timeout
                             )
                     self.ctx.logger.info("下载器连接校验通过：%s version=%s", settings.downloader, api_version)
-                self.set_plugin_config(normalized)
                 self._active_config = candidate.model_copy(deep=True)
             except (ValueError, asyncio.CancelledError) as exc:
-                # Restore runtime state only. Rewriting the Host's file here would race
-                # later saves and re-trigger its configuration watcher.
-                self.set_plugin_config(previous.model_dump(mode="python"))
+                # Only the command snapshot stays unchanged. Rolling back the SDK's
+                # config here would discard the saved token (or a newer update).
                 self.ctx.logger.error(
-                    "下载配置校验未通过：%s；继续使用上一次已应用的配置，请修正后重新保存。",
+                    "下载配置校验未通过：%s；已保留最新保存的配置，下载命令继续使用上一次已应用的配置。",
                     str(exc) or "校验已取消",
                 )
                 raise
@@ -259,7 +261,7 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
             downloader_name = "qBittorrent" if config.downloader == "qbittorrent" else "aria2"
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
                 if config.downloader == "qbittorrent":
-                    results = await submit_to_qbittorrent(
+                    summary = await submit_to_qbittorrent(
                         client,
                         magnets,
                         url=config.qbittorrent_url,
@@ -278,22 +280,30 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
                         rpc_timeout=config.rpc_timeout,
                         download_dir=config.download_dir,
                     )
-            added = sum(item.status == "added" for item in results)
-            accepted = sum(item.status == "accepted" for item in results)
-            rejected = sum(item.status == "rejected" for item in results)
-            unknown = sum(item.status == "unknown" for item in results)
+                    summary = SubmissionSummary(
+                        added=sum(item.status == "added" for item in results),
+                        rejected=sum(item.status == "rejected" for item in results),
+                        unknown=sum(item.status == "unknown" for item in results),
+                        errors=tuple(dict.fromkeys(item.error for item in results if item.error)),
+                    )
+            added = summary.added
+            accepted = summary.accepted
+            rejected = summary.rejected
+            unknown = summary.unknown
+            lines = []
+            if added:
+                lines.append(f"收到🫡 已添加 {added} 个下载任务到 {downloader_name}。")
             if accepted:
-                lines = [f"收到🫡 已向 {downloader_name} 提交 {accepted} 条磁链，下载器已接收请求。"]
+                prefix = "" if added else "收到🫡 "
+                lines.append(f"{prefix}已向 {downloader_name} 提交 {accepted} 条磁链，下载器已接收请求。")
                 lines.append("任务是否新增及实际下载状态请查看下载列表。")
-            else:
-                lines = [
-                    f"收到🫡 已添加 {added} 个下载任务到 {downloader_name}。" if added else "未确认有任务添加成功。"
-                ]
+            if not lines:
+                lines.append("未确认有任务添加成功。")
             if rejected:
                 lines.append(f"添加失败：{rejected} 个。")
             if unknown:
                 lines.append(f"结果未确认：{unknown} 个。请先检查 {downloader_name} 下载列表，避免重复提交。")
-            lines.extend(dict.fromkeys(item.error for item in results if item.error))
+            lines.extend(summary.errors)
             if warnings:
                 lines.append(warnings)
             self.ctx.logger.info(
@@ -304,7 +314,7 @@ class MagnetDownloadsPlugin(MaiBotPlugin):
                 rejected,
                 unknown,
             )
-            return await self._reply("\n".join(lines), stream_id, success=added + accepted == len(results))
+            return await self._reply("\n".join(lines), stream_id, success=added + accepted == len(magnets))
         finally:
             self._inflight.discard(key)
             if key[1]:

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
 
 from .magnets import Magnet
-from .submission import Submission
+from .submission import SubmissionSummary
 
 
 def request_headers(url: str, token: str) -> dict[str, str]:
@@ -47,6 +46,24 @@ async def check_connection(client: httpx.AsyncClient, *, url: str, token: str, r
     return version
 
 
+def _parse_add_response(response: httpx.Response, count: int) -> SubmissionSummary | None:
+    """Read the counts reported by WebAPI 2.14.0 and later."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    added = payload.get("success_count")
+    pending = payload.get("pending_count")
+    failed = payload.get("failure_count")
+    counts = (added, pending, failed)
+    if any(type(value) is not int or value < 0 for value in counts) or sum(counts) != count:
+        return None
+    return SubmissionSummary(added=added, accepted=pending, rejected=failed)
+
+
 async def submit_magnets(
     client: httpx.AsyncClient,
     magnets: list[Magnet],
@@ -57,19 +74,17 @@ async def submit_magnets(
     download_dir: str = "",
     category: str = "",
     tags: list[str] | None = None,
-) -> list[Submission]:
-    """Accept a batch once; an HTTP acknowledgement does not prove each task was added."""
+) -> SubmissionSummary:
+    """Submit a batch once and report the download client's result counts."""
     if not magnets:
-        return []
+        return SubmissionSummary()
 
-    def all_results(status: Literal["accepted", "rejected", "unknown"], error: str = "") -> list[Submission]:
-        return [Submission(magnet, status, error=error) for magnet in magnets]
-
+    count = len(magnets)
     base_url = url.rstrip("/")
     try:
         headers = request_headers(base_url, token)
     except ValueError as exc:
-        return all_results("rejected", str(exc))
+        return SubmissionSummary(rejected=count, errors=(str(exc),))
     form = {"urls": "\n".join(magnet.uri for magnet in magnets)}
     if download_dir:
         form.update(savepath=download_dir, autoTMM="false")
@@ -86,19 +101,32 @@ async def submit_magnets(
                 headers=headers,
                 timeout=rpc_timeout,
             )
-            if response.status_code in {401, 403}:
-                return all_results("rejected", "qBittorrent 未授权，请检查 API Token、下载器版本和 WebUI 访问限制。")
-            if response.status_code in {400, 404, 405, 415}:
-                return all_results(
-                    "rejected", f"qBittorrent 拒绝请求（HTTP {response.status_code}），请检查地址和配置。"
-                )
-            if response.status_code == 200 and response.text.strip() == "Ok.":
-                return all_results("accepted")
-            if response.status_code == 200 and response.text.strip() == "Fails.":
-                return all_results("rejected", "qBittorrent 拒绝本次添加请求，请检查磁链及下载配置。")
-            # A reverse proxy can return 200 HTML or 5xx after forwarding the write.
-            return all_results("unknown", "qBittorrent 未返回有效的接收确认，请先检查下载列表再重试。")
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        return all_results("rejected", "无法连接 qBittorrent，请检查 WebUI 地址和服务状态。")
+        return SubmissionSummary(rejected=count, errors=("无法连接 qBittorrent，请检查 WebUI 地址和服务状态。",))
     except (TimeoutError, httpx.HTTPError):
-        return all_results("unknown", "qBittorrent 请求超时或通信异常，请先检查下载列表再重试。")
+        return SubmissionSummary(unknown=count, errors=("qBittorrent 请求超时或通信异常，请先检查下载列表再重试。",))
+
+    status = response.status_code
+    if status in {401, 403}:
+        return SubmissionSummary(
+            rejected=count, errors=("qBittorrent 未授权，请检查 API Token、下载器版本和 WebUI 访问限制。",)
+        )
+    if status in {400, 404, 405, 415}:
+        return SubmissionSummary(rejected=count, errors=(f"qBittorrent 拒绝请求（HTTP {status}），请检查地址和配置。",))
+    if status == 409:
+        return SubmissionSummary(
+            rejected=count, errors=("qBittorrent 未添加本批任务（HTTP 409），请检查任务是否已存在以及磁链和下载配置。",)
+        )
+    if status == 200:
+        body = response.text.strip()
+        if body == "Ok.":
+            return SubmissionSummary(accepted=count)
+        if body == "Fails.":
+            return SubmissionSummary(rejected=count, errors=("qBittorrent 拒绝本次添加请求，请检查磁链及下载配置。",))
+    if status in {200, 202}:
+        summary = _parse_add_response(response, count)
+        if summary is not None:
+            return summary
+
+    # A reverse proxy can return 200 HTML or 5xx after forwarding the write.
+    return SubmissionSummary(unknown=count, errors=("qBittorrent 未返回有效的接收确认，请先检查下载列表再重试。",))
